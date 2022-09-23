@@ -4,8 +4,8 @@ import android.util.Log
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -14,6 +14,8 @@ class MainViewModel @Inject constructor(
     private val repository: WeatherRepository
 ) : ViewModel() {
 
+    // private val scope = MainScope()
+
     private val _uiState = MutableLiveData<UiState>(UiState.Empty)
     val uiState: LiveData<UiState> = _uiState
 
@@ -21,7 +23,8 @@ class MainViewModel @Inject constructor(
         _uiState.value = UiState.Loading
 
         Log.i("MainViewModel", "Launching coroutine")
-        MainScope().launch {
+        // scope.launch {
+        viewModelScope.launch {
             try {
                 val weather = repository.getCurrentWeather()
                 Log.i("MainViewModel", "Got weather")
@@ -35,6 +38,7 @@ class MainViewModel @Inject constructor(
     override fun onCleared() {
         super.onCleared()
         Log.i("MainViewModel", "onCleared")
+        // scope.cancel()
     }
 
     private fun makeErrorMessage(t: Throwable): String =
