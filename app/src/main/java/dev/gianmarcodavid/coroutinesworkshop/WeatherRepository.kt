@@ -1,7 +1,6 @@
 package dev.gianmarcodavid.coroutinesworkshop
 
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
@@ -11,7 +10,6 @@ class WeatherRepository @Inject constructor(
     private val weatherStorage: WeatherStorage
 ) {
     suspend fun getCurrentWeather(): Weather {
-        delay(5000)
         val location = getCurrentLocation()
         val weather = getForecast(location).currentWeather
         withContext(Dispatchers.IO) {
