@@ -1,15 +1,9 @@
 package dev.gianmarcodavid.coroutinesworkshop
 
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import retrofit2.Call
-import retrofit2.Callback
-import retrofit2.HttpException
-import retrofit2.Response
 import javax.inject.Inject
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 
 class WeatherRepository @Inject constructor(
     private val weatherApi: WeatherApi,
@@ -17,6 +11,7 @@ class WeatherRepository @Inject constructor(
     private val weatherStorage: WeatherStorage
 ) {
     suspend fun getCurrentWeather(): Weather {
+        delay(5000)
         val location = getCurrentLocation()
         val weather = getForecast(location).currentWeather
         withContext(Dispatchers.IO) {
@@ -26,30 +21,10 @@ class WeatherRepository @Inject constructor(
     }
 
     private suspend fun getCurrentLocation(): CurrentLocation {
-        return locationApi.getCurrentLocation().fetch()
+        return locationApi.getCurrentLocation()
     }
 
     private suspend fun getForecast(location: CurrentLocation): Forecast {
-        return weatherApi.getCurrentWeather(location.latitude, location.longitude).fetch()
-    }
-}
-
-private suspend fun <T> Call<T>.fetch(): T {
-    return suspendCancellableCoroutine { continuation ->
-        continuation.invokeOnCancellation { this.cancel() }
-
-        this.enqueue(object : Callback<T> {
-            override fun onResponse(call: Call<T>, response: Response<T>) {
-                if (response.isSuccessful) {
-                    continuation.resume(checkNotNull(response.body()))
-                } else {
-                    continuation.resumeWithException(HttpException(response))
-                }
-            }
-
-            override fun onFailure(call: Call<T>, t: Throwable) {
-                continuation.resumeWithException(t)
-            }
-        })
+        return weatherApi.getCurrentWeather(location.latitude, location.longitude)
     }
 }

@@ -1,5 +1,6 @@
 package dev.gianmarcodavid.coroutinesworkshop
 
+import android.util.Log
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
@@ -19,14 +20,21 @@ class MainViewModel @Inject constructor(
     fun onButtonClick() {
         _uiState.value = UiState.Loading
 
+        Log.i("MainViewModel", "Launching coroutine")
         MainScope().launch {
             try {
                 val weather = repository.getCurrentWeather()
+                Log.i("MainViewModel", "Got weather")
                 _uiState.postValue(UiState.Content(weather))
             } catch (e: Exception) {
                 _uiState.postValue(UiState.Error(makeErrorMessage(e)))
             }
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        Log.i("MainViewModel", "onCleared")
     }
 
     private fun makeErrorMessage(t: Throwable): String =
