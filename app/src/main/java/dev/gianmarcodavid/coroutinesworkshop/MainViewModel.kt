@@ -3,9 +3,11 @@ package dev.gianmarcodavid.coroutinesworkshop
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import javax.inject.Inject
-import kotlin.concurrent.thread
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
@@ -18,7 +20,7 @@ class MainViewModel @Inject constructor(
     fun onButtonClick() {
         _uiState.value = UiState.Loading
 
-        thread {
+        viewModelScope.launch(Dispatchers.IO) {
             try {
                 val weather = repository.getCurrentWeather()
                 _uiState.postValue(UiState.Content(weather))
