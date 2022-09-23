@@ -1,134 +1,152 @@
-# 5. Handling exceptions
+# 6. Cooperative cancellation
 
-In this exercise, we will learn how to handle exceptions in a coroutine and avoid a common pitfall.
+In this exercise, we will learn what cooperative cancellation is and how to support it in our suspending functions.
 
-The setup is similar to the previous exercise: there's still a second button, but this time it notifies `MainViewModel`
-by calling `onCancelClick` instead of finishing the Activity:
-
-```kotlin
-binding.cancelButton.setOnClickListener {
-    viewModel.onCancelClick()
-}
-```
-
-The purpose of this function is to cancel the current coroutine, if any, which is done by calling `cancel` on the `Job`
-associated to it. We encountered the `Job` interface earlier in exercise 1, where we learned that it's returned by
-`launch` and that it can be used for cancellation, as we're doing here.
-
-So, the starting implementation of `MainViewModel` now contains a `job` property which gets assigned when launching the
-coroutine and then used in `onCancelClick`.
+The setup is similar to the previous one. The app shows the "Get current weather" and "Cancel" buttons and they work as
+before. However, we now have a long task to execute before requesting the weather from the repository:
 
 ```kotlin
-private var job: Job? = null
-
-fun onButtonClick() {
-    _uiState.value = UiState.Loading
-
-    Log.i("MainViewModel", "Launching coroutine")
-    job = viewModelScope.launch {
-        try {
-            …
+private suspend fun longTask() {
+    withContext(Dispatchers.Default) {
+        repeat(10) {
+            Log.i("MainViewModel", "Executing step $it")
+            Thread.sleep(500)
         }
-        Log.i("MainViewModel", "The coroutine is still alive")
     }
 }
-
-fun onCancelClick() {
-    Log.i("MainViewModel", "Cancelling job $job")
-    job?.cancel()
-}
 ```
 
-The last bit of news is the log statement at the end of the coroutine, outside of the try-catch. We've been using this
-try-catch up until now and it served us well. If we ever got an exception, it was caught and handled as if we were using
-regular non-suspending functions. However, **it's also been silently hiding a bug from us**. Let's reproduce it.
+The purpose of this function is to emulate a long multi-step operation that blocks the thread. As we learned in exercise
+2, we set the dispatcher to make this code run in a background thread. We are using `Dispatchers.Default`, which is
+meant for CPU-intensive work.
 
-Let's run the app, tap on the usual "Get current weather" button and then on "Cancel". If we check the logs, we should
-see something like:
-
-> I/MainViewModel: Launching coroutine  
-> I/MainViewModel: Cancelling job StandaloneCoroutine{Active}@d997ce3  
-> I/MainViewModel: The coroutine is still alive
-
-It seems like the cancellation is not working as it should. While "Got weather" is never printed (provided that we
-canceled soon enough), we still get the log after the try-catch, indicating that the coroutine was still running. This
-happens because our catch clause is too greedy and it's catching something it shouldn't: a `CancellationException`.
-
-Kotlin coroutines use `CancellationException` to propagate _normal_ cancellation and we are interfering with that
-mechanism. There are several ways to fix our code, let's see some.
-
-## Catch only the exception(s) we care about
-
-The simplest solution, which should be the default when we catch exceptions, is to be specific in our catch clause:
+So, as mentioned above, we call `longTask` in `onButtonClick` before requesting the weather. We also log each step.
 
 ```kotlin
-try {
-    …
-} catch (e: HttpException) { // Catching only HttpException
-    _uiState.postValue(UiState.Error(makeErrorMessage(e)))
-}
-```
-
-## Check for `CancellationException` and rethrow it
-
-In some cases, we don't know what exceptions the code can throw. In these situations, an alternative solution is to
-rethrow `CancellationException` when we get one:
-
-```kotlin
-try {
-    …
-} catch (e: Exception) {
-    if (e is CancellationException) throw e // Check and rethrow
-    _uiState.postValue(UiState.Error(makeErrorMessage(e)))
-}
-Log.i("MainViewModel", "The coroutine is still alive")
-```
-
-Note that this is also true for `runCatching` and similar helpers:
-
-```kotlin
-runCatching {
-    repository.getCurrentWeather()
-}.onFailure {
-    if (it is CancellationException) throw it
-}
-
-```
-
-## Use a `CoroutineExceptionHandler` instead of try-catch
-
-The coroutines library offers a standard way to handle exceptions: `CoroutineExceptionHandler`.
-
-```kotlin
-// Create the handler containing the logic to process exceptions
-private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
-    _uiState.postValue(UiState.Error(makeErrorMessage(throwable)))
-}
-
 fun onButtonClick() {
     _uiState.value = UiState.Loading
 
     Log.i("MainViewModel", "Launching coroutine")
-    job = viewModelScope.launch(exceptionHandler) { // Pass the handler
-        // Remove the try-catch
+    job = viewModelScope.launch(exceptionHandler) {
+        longTask()
+        Log.i("MainViewModel", "After long task")
         val weather = repository.getCurrentWeather()
         Log.i("MainViewModel", "Got weather")
         _uiState.postValue(UiState.Content(weather))
-        Log.i("MainViewModel", "The coroutine is still alive")
+        Log.i("MainViewModel", "End of coroutine")
     }
 }
 ```
 
-The handler is called only when an unexpected and uncaught exception occurs and will ignore `CancellationException`,
-which is the behavior we want. It also allows us to decouple the happy path from the error handling, which may be
-convenient in some cases.
+Let's run the app, tap on the button to get the weather and cancel immediately after. In the Logcat, we should see
+something along the lines of:
 
-Like `CoroutineDispatcher` we saw in exercise 2, `CoroutineExceptionHandler` is an implementation of `CoroutineContext`
-and is another configuration we can set on a coroutine. In the code above, we are passing it to `launch`, but we may use
-it wherever a `CoroutineContext` is expected.
+> I/MainViewModel: Launching coroutine  
+> I/MainViewModel: Executing step 0  
+> I/MainViewModel: Executing step 1  
+> I/MainViewModel: Executing step 2  
+> I/MainViewModel: Executing step 3  
+> I/MainViewModel: Cancelling job StandaloneCoroutine{Active}@d997ce3  
+> I/MainViewModel: Executing step 4  
+> I/MainViewModel: Executing step 5  
+> I/MainViewModel: Executing step 6  
+> I/MainViewModel: Executing step 7  
+> I/MainViewModel: Executing step 8  
+> I/MainViewModel: Executing step 9
 
-If we test the app again we should now see that the coroutine is properly cancelled and the last log statement is never
-executed.
+Here we go again… the coroutine is not being cancelled. However, the issue seems to only affect `longTask`, because
+nothing else is printed after it finishes. So what's happening?
 
-Here's the [full solution](../../tree/05-solution) if you want to check it. Otherwise, **let's move to the
-[next exercise](../../tree/06-cooperative_cancellation).**
+Cancellation, in coroutines, is cooperative: **there is no way to _forcibly_ stop a running coroutine from outside**.
+For a coroutine to be canceled, it must check for cancellation and throw `CancellationException`. This behavior is
+implemented by all suspending functions in the coroutines library. We can demonstrate that by adding a call do `delay`
+at the beginning of each iteration in `longTask`:
+
+```kotlin
+private suspend fun longTask() {
+    withContext(Dispatchers.Default) {
+        repeat(10) {
+            delay(1) // Call delay with an argument > 0
+            Log.i("MainViewModel", "Executing step $it")
+            Thread.sleep(500)
+        }
+    }
+}
+```
+
+If we run the app and perform the same test as before, we should now get something like:
+
+> I/MainViewModel: Launching coroutine  
+> I/MainViewModel: Executing step 0  
+> I/MainViewModel: Executing step 1  
+> I/MainViewModel: Executing step 2  
+> I/MainViewModel: Cancelling job StandaloneCoroutine{Active}@d997ce3
+
+This time, the computation is canceled because `delay` checks internally if the coroutine is active and throws
+`CancellationException` if it's not.
+
+Using a random suspending call like `delay` for cooperating with cancellation may be confusing because it doesn't
+clearly signal what its real purpose is. Instead, we should use the functions provided for the job: `isActive`,
+`ensureActive`, `yield`.
+
+## Using `isActive`
+
+`isActive` is an extension of `CoroutineScope` and part of `Job`'s API, and returns true when the coroutine is still
+running. If we wanted to apply it to our code we could do:
+
+```kotlin
+private suspend fun longTask() {
+    withContext(Dispatchers.Default) {
+        repeat(10) {
+            if (!isActive) return@repeat // return if the coroutine is not active
+            Log.i("MainViewModel", "Executing step $it")
+            Thread.sleep(500)
+        }
+    }
+}
+```
+
+`isActive` gives us the freedom to execute arbitrary code when the coroutine is canceled but it also means we need to
+write the cancellation logic ourselves, so it's usually not our top choice.
+
+## Using `ensureActive`
+
+`ensureActive` is an extension of `CoroutineScope` and `Job` and implements the standard cancellation logic, i.e. it
+throws `CancellationException` if the coroutine is not active. Let's use it instead of the manual check:
+
+```kotlin
+private suspend fun longTask() {
+    withContext(Dispatchers.Default) {
+        repeat(10) {
+            ensureActive() // throw CancellationException if the coroutine is not active
+            Log.i("MainViewModel", "Executing step $it")
+            Thread.sleep(500)
+        }
+    }
+}
+```
+
+## Using `yield`
+
+`yield` calls `ensureActive` internally but it also yields the thread or thread pool belonging to the current dispatcher
+so that it can be used for running other coroutines.
+
+```kotlin
+private suspend fun longTask() {
+    withContext(Dispatchers.Default) {
+        repeat(10) {
+            yield() // ensure active and yield the thread
+            Log.i("MainViewModel", "Executing step $it")
+            Thread.sleep(500)
+        }
+    }
+}
+```
+
+In our case, there shouldn't be any behavioral difference between `ensureActive` and `yield` since we don't have
+multiple coroutines scheduled to run with the same dispatcher. However, `yield` is a good choice for computation tasks
+because it prevents us from starving other coroutines. If we never yield and the number of coroutines exceeds the number
+of available threads, the ones in excess will stay suspended until some of those running finish.
+
+
+Here's the [full solution](../../tree/06-solution) if you want to check it.

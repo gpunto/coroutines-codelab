@@ -1,6 +1,5 @@
 package dev.gianmarcodavid.coroutinesworkshop
 
-import kotlinx.coroutines.delay
 import javax.inject.Inject
 
 class WeatherRepository @Inject constructor(
@@ -8,7 +7,6 @@ class WeatherRepository @Inject constructor(
     private val locationApi: LocationApi,
 ) {
     suspend fun getCurrentWeather(): Weather {
-        delay(5000)
         val location = getCurrentLocation()
         val forecast = getForecast(location)
         return forecast.currentWeather
