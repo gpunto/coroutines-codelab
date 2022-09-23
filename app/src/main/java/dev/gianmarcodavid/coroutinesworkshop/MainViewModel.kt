@@ -4,6 +4,8 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 @HiltViewModel
@@ -17,12 +19,14 @@ class MainViewModel @Inject constructor(
     fun onButtonClick() {
         _uiState.value = UiState.Loading
 
-        repository.getCurrentWeather(
-            onSuccess = { weather ->
+        MainScope().launch {
+            try {
+                val weather = repository.getCurrentWeather()
                 _uiState.postValue(UiState.Content(weather))
-            }, onError = { t ->
-                _uiState.postValue(UiState.Error(makeErrorMessage(t)))
-            })
+            } catch (e: Exception) {
+                _uiState.postValue(UiState.Error(makeErrorMessage(e)))
+            }
+        }
     }
 
     private fun makeErrorMessage(t: Throwable): String =
