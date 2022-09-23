@@ -1,38 +1,168 @@
-# 2. Making coroutines from blocking code
+# 3. Making coroutines from callbacks
 
-In this exercise, we will learn how to create coroutines from blocking code.
+In this exercise, we will learn how to make coroutines from callbacks.
 
-From now on, we are going to work on an application to show the weather. The UI is similar to the previous exercise. It
-contains a text, a loader, and a button to request the weather. If any error occurs, it will be displayed on the UI.
-
-Code-wise, the app's structure should be familiar:
-
-- The data comes from two APIs:
-    - `LocationApi`: to get the current location
-    - `WeatherApi`: to get the weather for the location
-- `WeatherRepository`: in charge of the logic to call the APIs and return the current weather
-- `MainViewModel`: retrieves the weather through the repository and exposes the state for the UI
-- `MainActivity`: displays the state exposed by the ViewModel
-
-If you open `WeatherRepository`, you'll see the logic is straightforward and easy to follow:
+The code is similar to the previous exercise, with the difference that now the network requests are executed
+asynchronously and return their responses through callbacks. Their signatures look like this:
 
 ```kotlin
-fun getCurrentWeather(): Weather {
+fun getCurrentLocation(
+    onSuccess: (CurrentLocation) -> Unit,
+    onError: (Throwable) -> Unit
+)
+
+fun getForecast(
+    location: CurrentLocation,
+    onSuccess: (Forecast) -> Unit,
+    onError: (Throwable) -> Unit
+)
+```
+
+The use of callbacks in these functions trickles down to consumers, which have to use callbacks too. As a result,
+`getCurrentWeather` in `WeatherRepository` starts to descend into callback hell and becomes much more complex to
+understand:
+
+```kotlin
+fun getCurrentWeather(onSuccess: (Weather) -> Unit, onError: (Throwable) -> Unit) {
+    getCurrentLocation(onSuccess = { location ->
+        getForecast(location,
+            onSuccess = { forecast ->
+                onSuccess(forecast.currentWeather)
+            }, onError = {
+                onError(it)
+            })
+    }, onError = {
+        onError(it)
+    })
+}
+```
+
+Our task is to build coroutines out of these callbacks, so we can avoid the nesting and make the code look like it would
+if it was blocking, similar to how it was in the previous exercise.
+
+Both functions performing network requests are using internally the following custom `Call::fetch` function which, in
+turn, delegates to Retrofit's default callback mechanism.
+
+```kotlin
+private fun <T> Call<T>.fetch(onSuccess: (T) -> Unit, onError: (Throwable) -> Unit) {
+    this.enqueue(object : Callback<T> {
+        override fun onResponse(call: Call<T>, response: Response<T>) {
+            if (response.isSuccessful) {
+                onSuccess(checkNotNull(response.body()))
+            } else {
+                onError(HttpException(response))
+            }
+        }
+
+        override fun onFailure(call: Call<T>, t: Throwable) {
+            onError(t)
+        }
+    })
+}
+
+```
+
+This code should look familiar if you ever used naked Retrofit `Call`s. We enqueue the call and pass a callback that
+will be notified in case we get a response or an error. We then propagate the result through `onSuccess`and `onError` as
+appropriate.
+
+## Using `suspendCoroutine`
+
+So how do we convert our callbacks to coroutines? Luckily for us, there's a function made exactly for that:
+
+```kotlin
+suspend inline fun <T> suspendCoroutine(crossinline block: (Continuation<T>) -> Unit): T
+```
+
+As the name says, this function suspends the coroutine from where it's called. The interesting part is the `block`
+lambda. In particular, its `Continuation` parameter.
+
+```kotlin
+interface Continuation<in T> {
+    val context: CoroutineContext
+
+    fun resumeWith(result: Result<T>)
+}
+```
+
+A `Continuation` represents a handle to resume the associated coroutine. Its type parameter is the same as the
+coroutine's return type.
+
+**A coroutine can be resumed with a value or an exception** and this can be seen in `resumeWith` accepting a `Result<T>`
+. There are also two convenient extensions we can use instead of directly passing a `Result`: `resume`
+and `resumeWithException`.
+
+This is all we need to convert a callback: we wrap it into a `suspendCoroutine` call and we use the `Continuation` to
+resume the coroutine whenever the callback is invoked. Let's try doing so in our `Call::fetch`:
+
+```kotlin
+// 1. Add suspend modifier
+// 2. Remove onSuccess + onError callbacks and use T as return type
+private suspend fun <T> Call<T>.fetch(): T {
+    // 3. Wrap call to enqueue in suspendCoroutine
+    return suspendCoroutine { continuation ->
+        this.enqueue(object : Callback<T> {
+            override fun onResponse(call: Call<T>, response: Response<T>) {
+                if (response.isSuccessful) {
+                    // 4. Replace the onSuccess invocation with `continuation.resume`
+                    continuation.resume(checkNotNull(response.body()))
+                } else {
+                    // 5. Replace the onError invocation with `continuation.resumeWithException
+                    continuation.resumeWithException(HttpException(response))
+                }
+            }
+
+            override fun onFailure(call: Call<T>, t: Throwable) {
+                // 5. Replace the onError invocation with `continuation.resumeWithException
+                continuation.resumeWithException(t)
+            }
+        })
+    }
+}
+```
+
+Let's unpack. We:
+
+1. Added the `suspend` modifier, because `suspendCoroutine` is a `suspend` function
+2. Removed the `onSuccess` and `onError` callbacks we were receiving as parameters because we don't need them anymore
+3. Wrapped the call to `enqueue` in `suspendCoroutine`
+4. Replaced `onSuccess` invocations with `continuation.resume`  
+   (We could've also used `continuation.resumeWith(Result.success(value))`)
+5. Replaced `onError` invocations with `continuation.resumeWithException`  
+   (We could've also used `continuation.resumeWith(Result.failure(exception))`)
+
+After these changes, we can easily convert `getCurrentLocation` and `getForecast` to suspending functions, by adding
+`suspend`, removing the callbacks, and returning whatever `fetch` returns:
+
+```kotlin
+private suspend fun getCurrentLocation(): CurrentLocation {
+    return locationApi.getCurrentLocation().fetch()
+}
+
+private suspend fun getForecast(location: CurrentLocation): Forecast {
+    return weatherApi.getCurrentWeather(location.latitude, location.longitude).fetch()
+}
+```
+
+Now, we can finally make `getCurrentWeather` simple again:
+
+```kotlin
+suspend fun getCurrentWeather(): Weather {
     val location = getCurrentLocation()
     val forecast = getForecast(location)
     return forecast.currentWeather
 }
 ```
 
-However, this function blocks the thread for a considerable amount of time, considering that it performs two network
-calls. Indeed, if we were to call it from the main thread, the app would crash with a `NetworkOnMainThreadException`.
-This is why `MainViewModel` spawns a thread:
+It now looks surprisingly similar to the blocking function we had in the previous exercise.
+
+The last bit to change is in `MainViewModel`, which can now ditch the callbacks and go back to launching the coroutine:
 
 ```kotlin
 fun onButtonClick() {
     _uiState.value = UiState.Loading
 
-    thread {
+    MainScope().launch {
         try {
             val weather = repository.getCurrentWeather()
             _uiState.postValue(UiState.Content(weather))
@@ -41,115 +171,55 @@ fun onButtonClick() {
         }
     }
 }
+
 ```
 
-This code too is quite easy to follow. We get the current weather from the repository and notify the UI at each step.
-Also, a try-catch is all we need for handling errors.
+Let's run the app and breathe in relief because everything should still work as we want.
 
-Our job is to convert this code to coroutines, so let's apply what we learned in the previous exercise and use `launch`
-instead of creating a thread:
+## Forwarding cancellation
+
+In our solution, we've used `suspendCoroutine` which doesn't allow us to react to cancellation. It means that if the
+coroutine is canceled while the request is in progress, we won't notify Retrofit, so it will continue executing. What we
+should do instead, is use `suspendCancellableCoroutine`:
 
 ```kotlin
-fun onButtonClick() {
-    _uiState.value = UiState.Loading
-
-    MainScope().launch { // Replace thread with MainScope().launch
-        try {
-            val weather = repository.getCurrentWeather()
-            _uiState.postValue(UiState.Content(weather))
-        } catch (e: Exception) {
-            _uiState.postValue(UiState.Error(makeErrorMessage(e)))
-        }
-    }
-}
+suspend inline fun <T> suspendCancellableCoroutine(
+    crossinline block: (CancellableContinuation<T>) -> Unit
+): T
 ```
 
-We run the app, tap on the button, and…
-
-> Got an exception: NetworkOnMainThreadException
-
-Let's see what's happening. In the previous chapters, we said that `launch` executes a new coroutine asynchronously, but
-we also said that the code for every coroutine must be executed on some thread. So which thread is executing our code?
-To get to the answer, we need to know that **every coroutine has an associated `CoroutineContext`** which, in our case,
-is inherited from the `CoroutineScope`:
+Its definition is similar to `suspendCoroutine`, with the difference that we get a `CancellableContinuation` in the
+lambda. Among the functionalities it offers, it allows us to register a cancellation callback through
+`invokeOnCancellation`. That's what we're going to use:
 
 ```kotlin
-interface CoroutineScope {
-    val coroutineContext: CoroutineContext
-}
-```
+private suspend fun <T> Call<T>.fetch(): T {
+    // Replace suspendCoroutine with suspendCancellableCoroutine
+    return suspendCancellableCoroutine { continuation ->
+        // Cancel the Retrofit call when the coroutine is cancelled
+        continuation.invokeOnCancellation { this.cancel() }
 
-**We can think of `CoroutineContext` as a bag of elements** where every element is itself a `CoroutineContext`.
-
-![CoroutineContext](coroutinecontext.png)
-
-A context represents a set of configurations for a coroutine. One thing we can configure is the `CoroutineDispatcher`,
-which will decide on which thread the coroutine runs. Common dispatchers can be accessed through the `Dispatchers`
-object.
-
-If we check what the `MainScope` function we're calling does, we see that it's using `Dispatchers.Main`, which on
-Android uses the main thread.
-
-```kotlin
-fun MainScope(): CoroutineScope = ContextScope(SupervisorJob() + Dispatchers.Main)
-```
-
-All of this means that, in our ViewModel, we do launch the coroutine asynchronously, but **all of the _blocking_ code it
-contains runs on the main thread**.
-
-What we have have to do, then, is use a different dispatcher, in particular `Dispatchers.IO`, which is designed for I/O
-operations. We have several ways to set it:
-
-1\. We can override it for the whole scope, so that all coroutines started from it will be executed in background:
-
-```kotlin
-fun onButtonClick() {
-    _uiState.value = UiState.Loading
-
-    val scope = MainScope() + Dispatchers.IO // We need to import kotlinx.coroutines.plus
-    scope.launch {
-        …
-```
-
-However, it's not common to have to override the dispatcher for the entire scope.
-
-2\. We can set it for a specific portion of the code, by wrapping it in `withContext`:
-
-```kotlin
-MainScope().launch {
-    withContext(Dispatchers.IO) {
-        try {
+        this.enqueue(object : Callback<T> {
             …
-        }
-    }
-}
-
 ```
 
-This is useful when we need to set the dispatcher more than once in a coroutine or suspending function. Otherwise,
-there's a more common and easy way:
+With this simple change we now forward the coroutine's cancellation to the Retrofit call, so that it can be properly
+disposed and we don't waste resources.
 
-3\. We can set it for the whole coroutine by passing it to `launch`:
+Here's the [full solution](../../tree/03-solution) if you want to check it. Otherwise, **let's move to the
+[next exercise](../../tree/04-structured_concurrency).**
+
+## Bonus: Retrofit's default support for coroutines
+
+Up until now, we've been using Retrofit's `Call` directly, but we don't need to! Retrofit natively supports `suspend`
+functions, and the [logic][1] it uses is very similar to what we implemented above. So we can just add the modifier to
+our API definitions and return the response type we expect instead of `Call`. For example, `LocationApi` becomes:
+
+[1]: https://github.com/square/retrofit/blob/1490e6b1f90c616e2283b098a2c8e51a88cc97c2/retrofit/src/main/java/retrofit2/KotlinExtensions.kt
 
 ```kotlin
-fun onButtonClick() {
-    _uiState.value = UiState.Loading
-
-    MainScope().launch(Dispatchers.IO) {
-        …
+interface LocationApi {
+    @GET("json")
+    suspend fun getCurrentLocation(): CurrentLocation
+}
 ```
-
-If we now run the app, everything should be working again since the content of the lambda is executed on a background
-thread.
-
----
-
-**Note**: we have to specify the dispatcher in this exercise because we are converting blocking code to suspending
-functions. However, this usually isn't the case because suspend functions should be
-[main-safe](https://developer.android.com/kotlin/coroutines/coroutines-best-practices). In practice, it means that when
-we call suspending function, we should never need to change the dispatcher.
-
----
-
-Here's the [full solution](../../tree/02-solution) if you want to check it. Otherwise, **let's move to the
-[next exercise](../../tree/03-callbacks2coroutines).**
