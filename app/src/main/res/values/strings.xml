@@ -4,4 +4,5 @@
     <string name="empty_message">Nothing to see…</string>
     <string name="weather_template">"Temperature: %s°C\nWind speed: %s Km/h"</string>
     <string name="button_text">Get current weather</string>
+    <string name="cancel">Finish</string>
 </resources>

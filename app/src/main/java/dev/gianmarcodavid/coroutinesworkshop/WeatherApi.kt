@@ -2,16 +2,15 @@ package dev.gianmarcodavid.coroutinesworkshop
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import retrofit2.Call
 import retrofit2.http.GET
 import retrofit2.http.Query
 
 interface WeatherApi {
     @GET("forecast?&current_weather=true&timezone=Europe%2FBerlin")
-    fun getCurrentWeather(
+    suspend fun getCurrentWeather(
         @Query("latitude") latitude: Double,
         @Query("longitude") longitude: Double
-    ): Call<Forecast>
+    ): Forecast
 }
 
 @Serializable
