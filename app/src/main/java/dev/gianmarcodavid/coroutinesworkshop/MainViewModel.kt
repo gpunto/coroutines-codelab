@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import javax.inject.Inject
 
 @HiltViewModel
@@ -49,6 +50,7 @@ class MainViewModel @Inject constructor(
     private suspend fun longTask() {
         withContext(Dispatchers.Default) {
             repeat(10) {
+                yield()
                 Log.i("MainViewModel", "Executing step $it")
                 Thread.sleep(500)
             }
