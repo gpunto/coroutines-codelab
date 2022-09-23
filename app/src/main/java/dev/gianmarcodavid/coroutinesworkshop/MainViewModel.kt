@@ -6,6 +6,8 @@ import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -14,17 +16,16 @@ class MainViewModel @Inject constructor(
     private val repository: WeatherRepository
 ) : ViewModel() {
 
-    // private val scope = MainScope()
-
     private val _uiState = MutableLiveData<UiState>(UiState.Empty)
     val uiState: LiveData<UiState> = _uiState
+
+    private var job: Job? = null
 
     fun onButtonClick() {
         _uiState.value = UiState.Loading
 
         Log.i("MainViewModel", "Launching coroutine")
-        // scope.launch {
-        viewModelScope.launch {
+        job = viewModelScope.launch {
             try {
                 val weather = repository.getCurrentWeather()
                 Log.i("MainViewModel", "Got weather")
@@ -32,13 +33,15 @@ class MainViewModel @Inject constructor(
             } catch (e: Exception) {
                 _uiState.postValue(UiState.Error(makeErrorMessage(e)))
             }
+            Log.i("MainViewModel", "The coroutine is still alive")
+            delay(10)
+            Log.i("MainViewModel", "End of coroutine")
         }
     }
 
-    override fun onCleared() {
-        super.onCleared()
-        Log.i("MainViewModel", "onCleared")
-        // scope.cancel()
+    fun onCancelClick() {
+        Log.i("MainViewModel", "Cancelling job")
+        job?.cancel()
     }
 
     private fun makeErrorMessage(t: Throwable): String =

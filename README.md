@@ -1,106 +1,134 @@
-# 4. Structured concurrency
+# 5. Handling exceptions
 
-In this exercise, we will learn how structured concurrency helps us prevent leaking computations.
+In this exercise, we will learn how to handle exceptions in a coroutine and avoid a common pitfall.
 
-The code we will be using is very similar to what we had with a few differences:
-
-1. `MainActivity` displays an additional button to call `finish()` on tap. We also register a lifecycle observer to log
-   the state changes
-2. `MainViewModel` gains some log statements so we can see when things happen
-3. `WeatherRepository::getCurrentWeather` becomes slower thanks to an artificial `delay`
-
-Let's run the app, tap on the button to get the weather and the finish button quickly after. If we check the Logcat, we
-should see a timeline resembling this one:
-
-```
-I/MainViewModel: Launching coroutine
-I/MainActivity: Current lifecycle state: ON_PAUSE
-I/MainActivity: Current lifecycle state: ON_STOP
-I/MainActivity: Current lifecycle state: ON_DESTROY
-I/MainViewModel: onCleared
-[…] ~5 seconds delay
-[…] the two API calls
-I/MainViewModel: Got weather
-```
-
-That doesn't seem right. The Activity has been destroyed, the ViewModel's `onCleared` has been called, but the coroutine
-continues running until completion. This bug shouldn't surprise us because our code doesn't contain any cancellation
-logic. Let's fix that!
-
-In the intro to this workshop we said that coroutines adhere to _structured concurrency_, meaning that each of them has
-a parent delimiting its children's lifetime. This parent is the `CoroutineScope` and its `cancel` extension function is
-the way to stop the children coroutines:
+The setup is similar to the previous exercise: there's still a second button, but this time it notifies `MainViewModel`
+by calling `onCancelClick` instead of finishing the Activity:
 
 ```kotlin
-fun CoroutineScope.cancel(cause: CancellationException? = null)
+binding.cancelButton.setOnClickListener {
+    viewModel.onCancelClick()
+}
 ```
 
-In `MainViewModel`, we get an instance of `CoroutineScope` by invoking the `MainScope` function. So what we need to do
-is call `cancel` on this instance at the right time, which, in our case, is in the ViewModel's `onCleared`:
+The purpose of this function is to cancel the current coroutine, if any, which is done by calling `cancel` on the `Job`
+associated to it. We encountered the `Job` interface earlier in exercise 1, where we learned that it's returned by
+`launch` and that it can be used for cancellation, as we're doing here.
+
+So, the starting implementation of `MainViewModel` now contains a `job` property which gets assigned when launching the
+coroutine and then used in `onCancelClick`.
 
 ```kotlin
-private val scope = MainScope() // 1. Extract the scope to a class property
+private var job: Job? = null
 
 fun onButtonClick() {
     _uiState.value = UiState.Loading
 
     Log.i("MainViewModel", "Launching coroutine")
-    scope.launch { // 2. Use the scope property instead of creating a new one
-        …
+    job = viewModelScope.launch {
+        try {
+            …
+        }
+        Log.i("MainViewModel", "The coroutine is still alive")
     }
 }
 
-override fun onCleared() {
-    super.onCleared()
-    Log.i("MainViewModel", "onCleared")
-    scope.cancel() // 3. Cancel the scope
+fun onCancelClick() {
+    Log.i("MainViewModel", "Cancelling job $job")
+    job?.cancel()
 }
 ```
 
-If we now run the app and test the same scenario as before (tap on "Get current weather", tap on "Finish"), we will see
-that our logs stop with the ViewModel's `onCleared`, and this means that the coroutine is properly canceled:
+The last bit of news is the log statement at the end of the coroutine, outside of the try-catch. We've been using this
+try-catch up until now and it served us well. If we ever got an exception, it was caught and handled as if we were using
+regular non-suspending functions. However, **it's also been silently hiding a bug from us**. Let's reproduce it.
+
+Let's run the app, tap on the usual "Get current weather" button and then on "Cancel". If we check the logs, we should
+see something like:
 
 > I/MainViewModel: Launching coroutine  
-> I/MainActivity: Current lifecycle state: ON_PAUSE  
-> I/MainActivity: Current lifecycle state: ON_STOP  
-> I/MainActivity: Current lifecycle state: ON_DESTROY  
-> I/MainViewModel: onCleared
+> I/MainViewModel: Cancelling job StandaloneCoroutine{Active}@d997ce3  
+> I/MainViewModel: The coroutine is still alive
 
-## Ready-made scopes
+It seems like the cancellation is not working as it should. While "Got weather" is never printed (provided that we
+canceled soon enough), we still get the log after the try-catch, indicating that the coroutine was still running. This
+happens because our catch clause is too greedy and it's catching something it shouldn't: a `CancellationException`.
 
-Up until now, the burden of managing the scope was on ourselves: we used the `MainScope` function to instantiate it and
-then we had to cancel it manually. However, this isn't what we should normally do in an Android app, because androidx
-libraries provide ready-made scopes that are canceled automatically at the right time. For example:
+Kotlin coroutines use `CancellationException` to propagate _normal_ cancellation and we are interfering with that
+mechanism. There are several ways to fix our code, let's see some.
 
-- In a `LifecycleOwner`: `lifecycleScope`, canceled in `onDestroy`
-  - For Fragments use `viewLifecycleOwner`
-- In a `@Composable`: `rememberCoroutineScope()`, canceled when it leaves the composition
-- In a ViewModel: `viewModelScope`, canceled in `onCleared`
+## Catch only the exception(s) we care about
 
-So let's replace our custom logic with a call to the latter and ditch our `scope` property entirely:
+The simplest solution, which should be the default when we catch exceptions, is to be specific in our catch clause:
 
 ```kotlin
-// 1. Delete scope property
-// private val scope = MainScope()
+try {
+    …
+} catch (e: HttpException) { // Catching only HttpException
+    _uiState.postValue(UiState.Error(makeErrorMessage(e)))
+}
+```
+
+## Check for `CancellationException` and rethrow it
+
+In some cases, we don't know what exceptions the code can throw. In these situations, an alternative solution is to
+rethrow `CancellationException` when we get one:
+
+```kotlin
+try {
+    …
+} catch (e: Exception) {
+    if (e is CancellationException) throw e // Check and rethrow
+    _uiState.postValue(UiState.Error(makeErrorMessage(e)))
+}
+Log.i("MainViewModel", "The coroutine is still alive")
+```
+
+Note that this is also true for `runCatching` and similar helpers:
+
+```kotlin
+runCatching {
+    repository.getCurrentWeather()
+}.onFailure {
+    if (it is CancellationException) throw it
+}
+
+```
+
+## Use a `CoroutineExceptionHandler` instead of try-catch
+
+The coroutines library offers a standard way to handle exceptions: `CoroutineExceptionHandler`.
+
+```kotlin
+// Create the handler containing the logic to process exceptions
+private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+    _uiState.postValue(UiState.Error(makeErrorMessage(throwable)))
+}
 
 fun onButtonClick() {
     _uiState.value = UiState.Loading
 
     Log.i("MainViewModel", "Launching coroutine")
-    viewModelScope.launch { // 2. Use viewModelScope instead of the scope property
-        …
+    job = viewModelScope.launch(exceptionHandler) { // Pass the handler
+        // Remove the try-catch
+        val weather = repository.getCurrentWeather()
+        Log.i("MainViewModel", "Got weather")
+        _uiState.postValue(UiState.Content(weather))
+        Log.i("MainViewModel", "The coroutine is still alive")
     }
-}
-
-override fun onCleared() {
-    super.onCleared()
-    Log.i("MainViewModel", "onCleared")
-    // 3. Remove call to cancel
-    // scope.cancel()
 }
 ```
 
-Let's now run the app again and convince ourselves that it's working as before.
+The handler is called only when an unexpected and uncaught exception occurs and will ignore `CancellationException`,
+which is the behavior we want. It also allows us to decouple the happy path from the error handling, which may be
+convenient in some cases.
 
-Here's the [full solution](../../tree/04-solution) if you want to check it. Otherwise, **let's move to the
-[next exercise](../../tree/05-exception_handling).**
+Like `CoroutineDispatcher` we saw in exercise 2, `CoroutineExceptionHandler` is an implementation of `CoroutineContext`
+and is another configuration we can set on a coroutine. In the code above, we are passing it to `launch`, but we may use
+it wherever a `CoroutineContext` is expected.
+
+If we test the app again we should now see that the coroutine is properly cancelled and the last log statement is never
+executed.
+
+Here's the [full solution](../../tree/05-solution) if you want to check it. Otherwise, **let's move to the
+[next exercise](../../tree/06-cooperative_cancellation).**
