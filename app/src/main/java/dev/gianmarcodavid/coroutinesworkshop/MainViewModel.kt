@@ -1,17 +1,12 @@
 package dev.gianmarcodavid.coroutinesworkshop
 
-import android.util.Log
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineExceptionHandler
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.yield
 import javax.inject.Inject
 
 @HiltViewModel
@@ -22,8 +17,6 @@ class MainViewModel @Inject constructor(
     private val _uiState = MutableLiveData<UiState>(UiState.Empty)
     val uiState: LiveData<UiState> = _uiState
 
-    private var job: Job? = null
-
     private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
         _uiState.postValue(UiState.Error(makeErrorMessage(throwable)))
     }
@@ -31,29 +24,9 @@ class MainViewModel @Inject constructor(
     fun onButtonClick() {
         _uiState.value = UiState.Loading
 
-        Log.i("MainViewModel", "Launching coroutine")
-        job = viewModelScope.launch(exceptionHandler) {
-            longTask()
-            Log.i("MainViewModel", "After long task")
+        viewModelScope.launch(exceptionHandler) {
             val weather = repository.getCurrentWeather()
-            Log.i("MainViewModel", "Got weather")
             _uiState.postValue(UiState.Content(weather))
-            Log.i("MainViewModel", "End of coroutine")
-        }
-    }
-
-    fun onCancelClick() {
-        Log.i("MainViewModel", "Cancelling job $job")
-        job?.cancel()
-    }
-
-    private suspend fun longTask() {
-        withContext(Dispatchers.Default) {
-            repeat(10) {
-                yield()
-                Log.i("MainViewModel", "Executing step $it")
-                Thread.sleep(500)
-            }
         }
     }
 

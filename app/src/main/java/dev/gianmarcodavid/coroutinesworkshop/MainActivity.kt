@@ -22,9 +22,6 @@ class MainActivity : AppCompatActivity() {
         binding.button.setOnClickListener {
             viewModel.onButtonClick()
         }
-        binding.cancelButton.setOnClickListener {
-            viewModel.onCancelClick()
-        }
 
         viewModel.uiState.observe(this) { state ->
             showLoading(false)
