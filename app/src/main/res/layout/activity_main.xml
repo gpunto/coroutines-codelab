@@ -7,4 +7,26 @@
     android:orientation="vertical"
     tools:context=".MainActivity">
 
+    <TextView
+        android:id="@+id/textView"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:minLines="3"
+        android:padding="16dp"
+        android:textColor="@color/black"
+        android:textSize="20sp" />
+
+    <ProgressBar
+        android:id="@+id/progressBar"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:padding="16dp"
+        android:visibility="invisible" />
+
+    <Button
+        android:id="@+id/button"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/button_text" />
 </LinearLayout>
